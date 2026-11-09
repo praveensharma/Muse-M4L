@@ -1,4 +1,26 @@
-# Moog Muse Editor — Max for Live
+# Moog Muse Editor for Max for Live
+
+This checkout includes **Tonight r2**, a local MIDI editor build for the Moog
+Muse. It provides controls for 102 synth parameters and explicit preset recall
+from an Ableton MIDI track.
+
+1. Use Live 11 or 12 with Max for Live and connect the Muse over USB MIDI or a
+   MIDI interface.
+2. Run `python3 build_tonight.py` to generate
+   `build/tonight-r2/MuseEditor Tonight r2.amxd`. Copy the AMXD to
+   `User Library/Max4Live/Muse-M4L/` and load it on a MIDI track.
+3. Select the Muse port and channel in **MIDI To**. Enable **Receive CC** on the
+   Muse and turn **OUTPUT** on in the device. Move a filter control to test.
+   Enable **THRU** when sending clips or external performance MIDI through the
+   same track. For synth-knob feedback, leave **THRU** off.
+
+The device starts with **OUTPUT** and **THRU** off. Preset recall happens
+when you press **SEND**. Follow the [Tonight r2 guide](TONIGHT_GUIDE.md)
+for routing, preset recall, two timbres, and hardware test status.
+
+---
+
+## Upstream device reference
 
 A Max for Live **MIDI-effect** device that turns Ableton into a full editor for
 the Moog Muse. All 102 CC-addressable parameters are exposed as
@@ -243,4 +265,3 @@ Live, which the build environment doesn't have. The data-driven parts (controls,
 CC routing, Program Change) are straightforward; if anything needs a touch-up on
 first load it's most likely the `thispatcher` tab show/hide. Everything is
 regenerable from `generate_device.py`, so fixes are quick.
-```

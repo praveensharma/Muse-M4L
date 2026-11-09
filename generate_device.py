@@ -1,46 +1,16 @@
 #!/usr/bin/env python3
 """
-generate_device.py
-==================
+Build the local MuseEditor Tonight Max for Live MIDI-effect candidate.
 
-Builds ``MuseEditor.amxd`` - a Max for Live MIDI-effect device that is a full
-graphical editor for the Moog Muse.  The tabs follow the synth's own front-panel
-layout and signal flow so it reads like the hardware:
+102 CC controls retain the upstream layout and automation names. Output and
+input-through gates start closed; session-only OUTPUT and THRU header buttons
+open them deliberately. Hardware feedback updates UI via set without echo when
+THRU is off. PANIC bypasses both gates and releases pedal/latch/notes. Preset
+selectors write cold storage; SEND snapshots the UI and emits the transaction.
 
-    OSC | MIX | FILTER | ENV | VCA | MOD | LFO | DELAY | ARP | VOICE | BANK | MISC
-
-All 102 CC-addressable parameters are exposed as Ableton-automatable controls,
-drawn to mirror the matching front-panel control:
-
-    knob / bipolar  -> live.dial    (rotary knobs)
-    vert / horiz    -> live.slider  (mixer + ADSR faders, osc wave-mix faders)
-    toggle          -> live.toggle  (sends 0 / 127)
-    multistate      -> live.menu    (sends the centre value of the CC band)
-
-Every control carries an `annotation`/`hint` (Moog descriptions + CC number),
-so hovering shows what it does in Live's Info View, and a small INIT patch is
-applied via parameter defaults so a freshly loaded device starts on a sound.
-
-The whole UI fits inside Live's fixed 169-pixel device height: knob ("grid")
-tabs stack their controls in up to two compact rows grouped like the panel
-(OSC 1 over OSC 2, Filter 1 over Filter 2, ...), while the slider ("rack") tabs
-(MIX, ENV) show a single row of tall faders.  Only the active tab is visible
-(live.tab + thispatcher script show/hide, with per-tab scripting-name lists
-generated here so they cannot drift out of sync with the objects).  The Bank
-tab holds Program Change; the Misc tab holds Panic and (bidirectional) Pitch
-Bend.  Both
-Muse timbres are controlled by running one device instance per Ableton track on
-different MIDI channels (Multi Mode); Live's per-track MIDI To remaps the output.
-
-Outbound: every control -> [scale] -> prepend <cc> -> midiformat -> midiout.
-Inbound (bidirectional): one [ctlin <cc>] per control writes the value back
-with a `set` message, so turning a knob on the Muse updates the on-screen
-control without retransmitting.  Notes pass through midiin -> midiout.
-
-The ``.amxd`` binary container (ampf/meta/ptch + mx@c/dlst) is written to the
-format Ableton's maxdevtools produces (ported from the js2max writer).
-
-Run:  python3 generate_device.py   (standard library only)
+Run python3 build_tonight.py for tests, artifacts, preview and ZIP packaging.
+Running this generator alone writes build/tonight/MuseEditor Tonight.{amxd,maxpat}.
+The root upstream device and patch are left untouched. See TONIGHT_GUIDE.md.
 """
 
 import json
@@ -69,7 +39,9 @@ KBT = ["Off", "Half", "Full"]
 # index is exactly sum(value > bound).  Keyed by number of bands.
 BOUNDS = {3: [42, 84], 4: [31, 63, 95], 5: [24, 49, 74, 99]}
 
-CSV_PATH = "Muse_MIDI_CCs.csv"
+from pathlib import Path
+
+CSV_PATH = Path(__file__).resolve().parent / "Muse_MIDI_CCs.csv"
 
 
 def load_descriptions():
@@ -539,8 +511,8 @@ class Patch:
         styled to match the on/off buttons.  Emits on click; wire its outlet
         like a Max ``button``."""
         return self.box("live.text", rect, present=True, varname=varname,
-                        numinlets=1, numoutlets=1, outlettype=["bang"],
-                        mode=0, text=label, texton=label, fontsize=9.0,
+                        numinlets=1, numoutlets=2, outlettype=["bang", ""],
+                        parameter_enable=0, mode=0, text=label, texton=label, fontsize=9.0,
                         bgcolor=COL_BTN_OFF, bgoncolor=COL_ACCENT,
                         activebgcolor=COL_ACCENT, activebgoncolor=COL_ACCENT,
                         textcolor=COL_BTN_TXT, textoncolor=COL_WHITE,
@@ -594,7 +566,7 @@ class Patch:
             extra.update(extra_attrs)
         return self.box(
             maxclass, rect, present=True,
-            numinlets=1, numoutlets=1, outlettype=[""],
+            numinlets=1, numoutlets=2, outlettype=["", ""],
             parameter_enable=1,
             varname=varname or slug(longname),
             saved_attribute_attributes={"valueof": v},
@@ -702,15 +674,31 @@ def build():
     # ---- shared MIDI plumbing (off-canvas, not in presentation) ----------
     wx = DEVICE_WIDTH + 80
     midiin = p.obj("midiin", [wx, 20, 60, 22])
-    midiformat = p.obj("midiformat", [wx + 150, 60, 90, 22], numinlets=8)
+    midiformat = p.obj("midiformat 1", [wx + 150, 60, 90, 22], numinlets=7,
+                       numoutlets=2, outlettype=["int", ""])
     midiout = p.box("newobj", [wx + 150, 120, 60, 22], numinlets=1,
                     numoutlets=0, text="midiout")
-    p.connect(midiin, 0, midiout, 0)                     # note/MIDI thru
-    p.connect(midiformat, 0, midiout, 0)
+    # Gates start CLOSED in the object itself, before any parameter restoration.
+    output_gate = p.obj("gate 1 0", [wx + 150, 95, 70, 22], numinlets=2)
+    thru_gate = p.obj("gate 1 0", [wx, 60, 70, 22], numinlets=2)
+    p.connect(midiin, 0, thru_gate, 1)
+    p.connect(thru_gate, 0, output_gate, 1)
+    p.connect(midiformat, 0, output_gate, 1)
+    p.connect(output_gate, 0, midiout, 0)
+    output_button, thru_button, panic = build_header(p, midiout, wx)
+    p.connect(output_button, 0, output_gate, 0)
+    p.connect(thru_button, 0, thru_gate, 0)
+    # Disabling either path releases held notes. This is a user action only;
+    # load-time button resets use 'set' and cannot trigger Panic.
+    for button in (output_button, thru_button):
+        off = p.obj("sel 0", [wx + 60, 180, 50, 22], numinlets=2,
+                    numoutlets=2, outlettype=["bang", ""])
+        p.connect(button, 0, off, 0)
+        p.connect(off, 0, panic, 0)
 
     # ---- header: tab strip (16px tall so live.tab stays a single row) ----
     tab_labels = [t[0] for t in TABS] + ["BANK", "MISC"]
-    tab = p.live("live.tab", [MARGIN, 5, DEVICE_WIDTH - 2 * MARGIN, 16],
+    tab = p.live("live.tab", [MARGIN, 5, DEVICE_WIDTH - 2 * MARGIN - 220, 16],
                  "Tab", 2, 0, len(tab_labels) - 1, enum=tab_labels,
                  varname="TabSel")
 
@@ -759,9 +747,16 @@ def build():
             x += sec_w + SEC_GAP
         tab_members.append(members)
 
+    # Panic also reflects pedal/latch release in the UI without re-sending.
+    reset_latches = p.msg("set 0", [wx + 650, 420, 60, 22])
+    p.connect(panic, 0, reset_latches, 0)
+    for name in ("Hold", "Sustain_Pedal"):
+        control = next(b["box"]["id"] for b in p.boxes if b["box"].get("varname") == name)
+        p.connect(reset_latches, 0, control, 0)
+
     # ---- Bank tab (Program Change) and Misc tab (panic / bend) -----------
     tab_members.append(build_bank_tab(p, midiformat, wx))
-    tab_members.append(build_misc_tab(p, midiin, midiformat, wx))
+    tab_members.append(build_misc_tab(p, panic))
 
     # ---- tab switching machinery (thispatcher script show/hide) ----------
     thisp = p.obj("thispatcher", [wx, 380, 90, 22], numinlets=1, numoutlets=2,
@@ -785,13 +780,17 @@ def build():
         p.connect(show, 0, thisp, 0)
     p.connect(tab, 0, tii, 0)
 
-    # ---- load-time init: channel 1, select tab 0 -------------------------
+    # ---- load-time init: close output/thru, select tab 0 -------------------------
     lb = p.box("loadbang", [wx, 90, 60, 22], numinlets=1, numoutlets=1,
                outlettype=["bang"])
-    ch1 = p.msg("1", [wx, 120, 40, 22])
-    p.connect(lb, 0, ch1, 0)
-    p.connect(ch1, 0, midiformat, 7)        # device sends on ch 1; Live's track
-                                            # MIDI To remaps to the Muse's channel
+    reset_ui = p.msg("set 0", [wx, 120, 50, 22])
+    p.connect(lb, 0, reset_ui, 0)
+    p.connect(reset_ui, 0, output_button, 0)
+    p.connect(reset_ui, 0, thru_button, 0)
+    close_gates = p.msg("0", [wx, 150, 40, 22])
+    p.connect(lb, 0, close_gates, 0)
+    p.connect(close_gates, 0, output_gate, 0)
+    p.connect(close_gates, 0, thru_gate, 0)
     dly = p.obj("delay 300", [wx + 80, 120, 70, 22], numinlets=2)
     zero = p.msg("0", [wx + 80, 150, 40, 22])
     p.connect(lb, 0, dly, 0)
@@ -799,6 +798,36 @@ def build():
     p.connect(zero, 0, tab, 0)
     p.connect(zero, 0, tii, 0)
     return p
+
+
+def build_header(p, midiout, wx):
+    """Always-visible, nonstored session switches plus unconditional Panic."""
+    x = DEVICE_WIDTH - MARGIN - 212
+    buttons = []
+    for i, (name, off, on, hint) in enumerate([
+        ("OutputEnable", "OUTPUT OFF", "OUTPUT ON", "Enable MIDI output after loading. Does not push current UI values."),
+        ("MidiThru", "THRU OFF", "THRU ON", "Pass incoming notes and controls. Keep OFF when receiving Muse feedback."),
+    ]):
+        buttons.append(p.box("textbutton", [x + i * 76, 5, 72, 16],
+            present=True, varname=name, numinlets=1, numoutlets=3,
+            outlettype=["", "", "int"], parameter_enable=0, mode=1,
+            active=1, ignoreclick=0, outputmode=1, usebgoncolor=1, usegradient=0,
+            text=off, texton=on, annotation=hint, hint=hint, fontsize=8.0,
+            bgcolor=COL_BTN_OFF, bgoncolor=COL_ACCENT,
+            textcolor=COL_BTN_TXT, textoncolor=COL_WHITE))
+    panic_button = p.text_button([x + 152, 5, 60, 16], "HeaderPanic", "PANIC")
+    # Separate formatter bypasses the closed output gate, so Panic always works.
+    panic_format = p.obj("midiformat 1", [wx + 600, 100, 90, 22],
+                         numinlets=7, numoutlets=2, outlettype=["int", ""])
+    p.connect(panic_format, 0, midiout, 0)
+    panic = p.obj("t b b b b", [wx + 600, 140, 90, 22], numinlets=1,
+                  numoutlets=4, outlettype=["bang"] * 4)
+    p.connect(panic_button, 0, panic, 0)
+    for outlet, cc in zip((3, 2, 1, 0), (64, 71, 123, 120)):
+        message = p.msg("%d 0" % cc, [wx + 600, 180 + outlet * 26, 60, 22])
+        p.connect(panic, outlet, message, 0)
+        p.connect(message, 0, panic_format, 2)
+    return buttons[0], buttons[1], panic
 
 
 def build_bank_tab(p, midiformat, wx):
@@ -815,12 +844,12 @@ def build_bank_tab(p, midiformat, wx):
     lbl("PROGRAM CHANGE", [bx, SEC_TOP + 3, 160, 12], "pc_t0", bold=True)
     lbl("Bank", [bx, 58, 30, 14], "pc_l1")
     bank = p.live("live.numbox", [bx + 34, 56, 40, 18], "PC Bank", 1, 1, 16,
-                  varname="PCBank", annotation="Muse bank to recall (1-16)",
+                  varname="PCBank", initial=1, annotation="Muse bank to recall (1-16)",
                   extra_attrs={"bordercolor": COL_BORDER})
     members.append("PCBank")
     lbl("Patch", [bx + 86, 58, 34, 14], "pc_l2")
     patch = p.live("live.numbox", [bx + 122, 56, 40, 18], "PC Patch", 1, 1,
-                   16, varname="PCPatch",
+                   16, varname="PCPatch", initial=1,
                    annotation="Patch within the bank to recall (1-16)",
                    extra_attrs={"bordercolor": COL_BORDER})
     members.append("PCPatch")
@@ -831,22 +860,32 @@ def build_bank_tab(p, midiformat, wx):
     lbl("Requires MENU > MIDI > RECEIVE PGM CHNG: ON on the Muse.",
         [bx, 110, 520, 14], "pc_h2")
 
-    # Bank MSB(cc0=0) -> Bank LSB(cc32=bank-1) -> Program Change(patch-1)
+    # SEND is the sole trigger. Selector changes/automation/restore only write
+    # cold storage. Bank Select is a literal 1..16 (Muse 1.4 manual p.111);
+    # Program Change uses the conventional zero-based wire value 0..15.
     pc_t = p.obj("t b b b", [wx + 300, 460, 80, 22], numinlets=1,
                  numoutlets=3, outlettype=["bang", "bang", "bang"])
-    p.connect(send, 0, pc_t, 0)
+    # Read the displayed selectors first, including any silent host restore.
+    capture = p.obj("t b b b", [wx + 200, 430, 80, 22], numinlets=1,
+                    numoutlets=3, outlettype=["bang"] * 3)
+    p.connect(send, 0, capture, 0)
+    p.connect(capture, 2, bank, 0)
+    p.connect(capture, 1, patch, 0)
+    p.connect(capture, 0, pc_t, 0)
     msb = p.msg("0 0", [wx + 300, 500, 50, 22])
     p.connect(pc_t, 2, msb, 0)                           # fires first
     p.connect(msb, 0, midiformat, 2)
-    p.connect(pc_t, 1, bank, 0)
-    bsub = p.obj("- 1", [wx + 300, 540, 50, 22], numinlets=2)
-    p.connect(bank, 0, bsub, 0)
+    bank_store = p.obj("i 1", [wx + 300, 540, 50, 22], numinlets=2)
+    p.connect(bank, 0, bank_store, 1)
+    p.connect(pc_t, 1, bank_store, 0)
     blsb = p.obj("prepend 32", [wx + 300, 570, 80, 22], numinlets=2)
-    p.connect(bsub, 0, blsb, 0)
+    p.connect(bank_store, 0, blsb, 0)
     p.connect(blsb, 0, midiformat, 2)
-    p.connect(pc_t, 0, patch, 0)                          # fires last
+    patch_store = p.obj("i 1", [wx + 420, 510, 50, 22], numinlets=2)
+    p.connect(patch, 0, patch_store, 1)
+    p.connect(pc_t, 0, patch_store, 0)                   # fires last
     psub = p.obj("- 1", [wx + 420, 540, 50, 22], numinlets=2)
-    p.connect(patch, 0, psub, 0)
+    p.connect(patch_store, 0, psub, 0)
     p.connect(psub, 0, midiformat, 3)
     return members
 
@@ -870,7 +909,7 @@ def wire_pitchbend(p, pb, midiin, midiformat, wx):
     p.connect(pbset, 0, pb, 0)
 
 
-def build_misc_tab(p, midiin, midiformat, wx):
+def build_misc_tab(p, panic):
     """Panic and notes - only on the Misc tab."""
     members = [p.tab_panel("misc_bg")]
     bx = MARGIN + 8
@@ -882,21 +921,15 @@ def build_misc_tab(p, midiin, midiformat, wx):
                   textcolor=COL_TITLE if bold else COL_LABEL)
 
     lbl("PANIC", [bx, SEC_TOP + 3, 160, 12], "ms_t0", bold=True)
-    # PANIC: All Notes Off (CC123=0) + All Sound Off (CC120=0).
-    pn = p.text_button([bx, 56, 150, 18], "Panic", "ALL NOTES OFF")
-    members.append("Panic")
-    for cc in (123, 120):
-        m = p.msg("%d 0" % cc, [wx + 600, 460 + cc, 50, 22])
-        p.connect(pn, 0, m, 0)
-        p.connect(m, 0, midiformat, 2)
+    pn = p.text_button([bx, 56, 150, 18], "MiscPanic", "ALL NOTES OFF")
+    members.append("MiscPanic")
+    p.connect(pn, 0, panic, 0)
 
-    lbl("Clears stuck notes (sends All Notes Off / All Sound Off).",
+    lbl("PANIC releases Sustain / Hold and sends All Notes Off / All Sound Off.",
         [bx, 92, 600, 14], "ms_h0")
-    lbl("Pitch Bend is on the VOICE tab (bidirectional). Mod Wheel, Hold, "
-        "Expression & Sustain are on VOICE too.", [bx, 110, 600, 14],
-        "ms_h1")
-    lbl("The Muse's knobs sync per-CC on every tab; there's no one-click "
-        "'pull' (the Muse can't transmit its whole state).",
+    lbl("OUTPUT enables sending. THRU passes incoming MIDI: leave OFF for hardware feedback.",
+        [bx, 110, 650, 14], "ms_h1")
+    lbl("UI values are partial: loading a Muse preset does not synchronize every control.",
         [bx, 128, 600, 14], "ms_h2")
     return members
 
@@ -999,7 +1032,7 @@ def route_in(p, kind, enum, cc, ctrl, wx):
     """
     wy = 240 + cc * 8
     ci = p.obj("ctlin %d" % cc, [wx + 980, wy, 70, 22], numinlets=1,
-               numoutlets=3, outlettype=["", "", ""])
+               numoutlets=2, outlettype=["int", "int"])
     src, sout = ci, 0                                    # outlet 0 = value
     if kind == T:
         ge = p.obj(">= 64", [wx + 1060, wy, 50, 22], numinlets=2)
@@ -1073,12 +1106,21 @@ def main():
     slugs = [slug(n) for n in longs]
     assert len(slugs) == len(set(slugs)), "duplicate scripting name"
 
+    import argparse
+    from pathlib import Path
+    parser = argparse.ArgumentParser(description="Build the MuseEditor tonight candidate")
+    parser.add_argument("--output-dir", default="build/tonight-r2")
+    args = parser.parse_args()
+    output = Path(args.output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    maxpat_path = output / "MuseEditor Tonight r2.maxpat"
+    amxd_path = output / "MuseEditor Tonight r2.amxd"
     patch = build()
     maxpat = patch.to_maxpat()
-    with open(MAXPAT_PATH, "w") as f:
+    with maxpat_path.open("w") as f:
         json.dump(maxpat, f, indent="\t")
-    amxd = build_amxd(maxpat, "mmmm", AMXD_PATH)
-    with open(AMXD_PATH, "wb") as f:
+    amxd = build_amxd(maxpat, "mmmm", amxd_path.name)
+    with amxd_path.open("wb") as f:
         f.write(amxd)
 
     # report max presentation Y so we know it fits the 169px device height
@@ -1089,7 +1131,7 @@ def main():
     print("Parameters: %d across %d tabs" % (len(longs), len(TABS)))
     print("Max presentation Y: %.0f px (must be <= 169)" % maxy)
     print("Wrote %s (%d bytes) and %s" %
-          (AMXD_PATH, len(amxd), MAXPAT_PATH))
+          (amxd_path, len(amxd), maxpat_path))
 
 
 if __name__ == "__main__":

@@ -157,7 +157,7 @@ def render():
         parts.append('<rect x="%d" y="%d" width="%d" height="%d" fill="%s"/>'
                      % (MARGIN, oy, W, DEVH, BG))
         # tab strip
-        tw = (W - 2 * MARGIN) / float(len(tab_labels))
+        tw = (W - 2 * MARGIN - 220) / float(len(tab_labels))
         for li, lab in enumerate(tab_labels):
             on = (li == ti)
             tx = MARGIN + li * tw
@@ -168,6 +168,11 @@ def render():
             parts.append(text(tx + tw / 2.0, oy + 5 + 11, lab,
                               WHITE if on else LABEL, 7,
                               weight="bold" if on else "normal"))
+        hx = W - MARGIN - 212
+        for offset, width, label in [(0, 72, "OUTPUT OFF"), (76, 72, "THRU OFF"), (152, 60, "PANIC")]:
+            parts.append('<rect x="%.1f" y="%d" width="%d" height="16" rx="2" fill="%s" stroke="%s"/>'
+                         % (hx + offset, oy + 5, width, BTN_OFF, BORDER))
+            parts.append(text(hx + offset + width/2, oy + 16, label, BTN_TXT, 8))
         # sections
         sx = MARGIN
         for title, rows in sections:
@@ -194,10 +199,11 @@ def render():
     svg = ('<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" '
            'viewBox="0 0 %d %d">%s</svg>'
            % (W + 2 * MARGIN, total_h, W + 2 * MARGIN, total_h, "".join(parts)))
-    with open("layout_preview.svg", "w") as f:
-        f.write(svg)
-    print("Wrote layout_preview.svg (%d tabs, device %dpx wide)"
-          % (len(G.TABS), W))
+    from pathlib import Path
+    output = Path("build/tonight-r2/layout_preview.svg")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(svg)
+    print("Wrote %s (%d tabs, device %dpx wide)" % (output, len(G.TABS), W))
 
 
 if __name__ == "__main__":
